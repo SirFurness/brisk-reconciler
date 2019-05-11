@@ -64,13 +64,18 @@ module State = {
   type t('a) = {
     currentValue: 'a,
     mutable nextValue: 'a,
+    mutable stale: bool,
   };
 
   type hook('a) +=
     | State(t('a)): hook(t('a));
 
   let make: 'a => t('a) =
-    initialValue => {currentValue: initialValue, nextValue: initialValue};
+    initialValue => {
+      currentValue: initialValue,
+      nextValue: initialValue,
+      stale: false,
+    };
 
   let wrapAsHook = s => State(s);
 
@@ -78,11 +83,12 @@ module State = {
     stateContainer.nextValue = nextValue;
   };
 
-  let flush = ({currentValue, nextValue}) =>
+  let flush = ({currentValue, nextValue} as prevHook) =>
     if (currentValue === nextValue) {
       None;
     } else {
-      Some({currentValue: nextValue, nextValue});
+      prevHook.stale = true;
+      Some({currentValue: nextValue, nextValue, stale: false});
     };
 
   let hook = (initialState, hooks) => {
@@ -91,10 +97,25 @@ module State = {
 
     let onStateDidChange = hooks.onStateDidChange;
 
-    let setter = nextState => {
-      setState(nextState, stateContainer);
-      onStateDidChange();
-    };
+    let setter = nextState =>
+      if (stateContainer.stale) {
+        let backtrace = Printexc.get_backtrace();
+        Printf.printf(
+          "
+          WARNING: A stale state setter has been used. The state has been updated and flushed since using state hook here:\n
+          \n
+          %s
+          \n
+          Using stale setters might lead to race conditions which are hard to debug. If you want to update state
+          asynchronously without updating the setter function each time, we recommend using the reducer hook
+          which enforces handling of race conditions.
+          ",
+          backtrace,
+        );
+      } else {
+        setState(nextState, stateContainer);
+        onStateDidChange();
+      };
 
     (stateContainer.currentValue, setter, nextHooks);
   };
@@ -274,11 +295,11 @@ let pendingEffects = (~lifecycle, hooks) =>
     HeterogenousList.fold(
       (acc, opaqueValue) =>
         switch (opaqueValue) {
-        | HeterogenousList.Any(Effect.Effect(state)) => 
-        switch (Effect.get(~lifecycle, state)) {
-          | Some(effect) => EffectSequence.chain(acc, effect);
+        | HeterogenousList.Any(Effect.Effect(state)) =>
+          switch (Effect.get(~lifecycle, state)) {
+          | Some(effect) => EffectSequence.chain(acc, effect)
           | None => acc
-        }
+          }
         | _ => acc
         },
       EffectSequence.noop,
